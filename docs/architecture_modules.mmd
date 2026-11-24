@@ -1,0 +1,31 @@
+%% ① 模块连接架构：四线程核心 + 共享取指 + BRU + 内存（规格级）
+flowchart LR
+    PC[Program Counter 16bit<br/>跳转目标 / 顺延+2]
+    IMEM[Instruction Memory<br/>按 pc_addr 取指]
+    BRU[BRU 分支单元<br/>收敛栈 + 调用栈 + 使能仲裁]
+
+    PC -->|pc_addr| IMEM
+    IMEM -->|instr 32bit 共享同一条| CORES
+
+    subgraph CORES[基础线程核心 × 4]
+        direction TB
+        TC0["C0 线程核心<br/>RegFile + ALU + FPU + 译码控制 + 掩码寄存器"]
+        TC1["C1 线程核心<br/>(同上)"]
+        TC2["C2 线程核心<br/>(同上)"]
+        TC3["C3 线程核心<br/>(同上)"]
+    end
+
+    CORES -->|"每核: 分支端口(6) + 计算标志(16) + 掩码(1)"| BRU
+    BRU -->|"bru_en[3:0] 每核 1bit 使能"| CORES
+
+    MEM[(内存 / 访存体)]
+    CORES -->|"每核 mem 接口: mem_addr 17 / wen / ren / atomic 3 / data 16"| MEM
+
+    BRU -->|"bru_jump_addr 16 + bru_jump_req 1"| PC
+
+    classDef coreP fill:#eef6ff,stroke:#38f,stroke-width:1px;
+    classDef bruP fill:#fff2cc,stroke:#d4a017,stroke-width:1px;
+    classDef memP fill:#eafbea,stroke:#3a3,stroke-width:1px;
+    class TC0,TC1,TC2,TC3 coreP;
+    class BRU bruP;
+    class IMEM,PC,MEM memP;

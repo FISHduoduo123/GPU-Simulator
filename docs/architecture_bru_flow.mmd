@@ -1,0 +1,40 @@
+%% ② BRU 内部逻辑流程（规格级）
+flowchart TD
+    START["每周期: 读 4 组核心输入<br/>(br_op / br_jump_addr / br_cond /<br/>br_uncond_attr / br_func / br_flags / br_mask)"] --> DEC{ br_op }
+
+    DEC -- "0000 无分支" --> DEF[PC 顺延 +2]
+    DEC -- "0110 BRA" --> BRA{ br_uncond_attr }
+    DEC -- "0111 BRAF" --> BF
+    DEC -- "1000 BRAP / REA" --> BAP3{ br_func }
+    DEC -- "1001 CALL / RET" --> CR{ br_func }
+
+    BRA -- "0 普通" --> BRA1[PC = br_jump_addr]
+    BRA -- "1 收敛" --> CONV
+    BF --> BFM
+    CONV --> CONV0
+
+    BAP3 -- "0 BRAP" --> BAP1["对每核: br_mask=1 → 关闭该核 bru_en<br/>全部处理完: PC = 入口地址"]
+    BAP3 -- "1 REA" --> BAP2["全使能 bru_en = 1111<br/>不设 PC"]
+
+    CR -- "0 CALL" --> CR1[压 调用栈: PC+2<br/>PC = 目标地址]
+    CR -- "1 RET" --> CR2[调用栈 弹栈 → PC = 返回地址]
+
+    BRA1 --> J[更新 PC 并置 bru_jump_req]
+
+    subgraph CONVSUB["BRA(func=1) 收敛点"]
+        CONV0{当前状态}
+        CONV0 -- "路径 1" --> CONV1["状态 → 2<br/>栈顶 状态字段 → 路径2<br/>按栈地址 设 PC<br/>本条跳转地址 写栈(替换16bit地址字段)"]
+        CONV0 -- "路径 2" --> CONV2["比较 栈顶地址 与 指令地址 (结果预留)<br/>PC = 栈中地址<br/>弹栈<br/>弹栈后状态 = 新栈顶状态, 无栈块→普通"]
+    end
+
+    subgraph BRAFSUB["BRAF 三状态"]
+        BFM{仅使能线程与 cond 比对}
+        BFM -- "仅满足" --> BMF1[PC = br_jump_addr]
+        BFM -- "仅不满足" --> BMF2[不设 PC, 顺延 +2]
+        BFM -- "混合" --> BMF3["压 收敛栈: 状态 + 4bit掩码(~满足 AND 使能) + 下一条地址<br/>设 bru_en 只使能满足线程, 转路径1, PC=跳转地址"]
+    end
+
+    classDef doneD fill:#e8f5e9,stroke:#2e7d32;
+    classDef waitD fill:#fff8e1,stroke:#f9a825;
+    class BRA1,BAP1,BAP2,CR1,CR2,DEF,BMF1,BMF2,BMF3 doneD;
+    class CONV1,CONV2 waitD;

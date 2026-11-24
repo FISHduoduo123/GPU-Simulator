@@ -1,0 +1,12 @@
+[package]
+name = "gpu_core"
+version = "0.1.0"
+edition = "2021"
+description = "GPU 模拟器 —— 基础线程核心：寄存器组、整数 ALU、FP16 浮点单元（纯标准库）"
+readme = "README.md"
+
+# 以下两项需要你提供的真实值后取消注释并填写（我不替你去猜）：
+# authors = ["姓名 <邮箱>"]
+# license = "MIT"
+
+[dependencies]
