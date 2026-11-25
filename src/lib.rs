@@ -16,14 +16,20 @@
 //! ```
 
 pub mod alu;
+pub mod bru;
 pub mod fpu;
+pub mod memory;
 pub mod regfile;
+pub mod system;
 pub mod thread_core;
 
 pub use alu::{func as alu_func, ALU, AluResult, IntFlags};
-pub use fpu::{ffunc, FPU, FpuResult, FloatFlags, f32_to_half, half_to_f32};
+pub use bru::{BruCoreIn, BruOut, BRU};
+pub use fpu::{f32_to_half, ffunc, half_to_f32, FloatFlags, FpuResult, FPU};
+pub use memory::Memory;
 pub use regfile::RegFile;
-pub use thread_core::{op, ThreadContext, ThreadCore, CycleOut, MemReq};
+pub use system::{enc, GpuSystem, StepOut};
+pub use thread_core::{op, BrOut, CycleOut, MemReq, ThreadContext, ThreadCore};
 
 /// 一个把寄存器组、ALU、FPU 按规格连接的最小示意图（仅供说明，非流水线实现）。
 ///

@@ -62,17 +62,42 @@ impl ThreadContext {
     }
 }
 
-/// 访存接口请求骨架（协议后续展开）。
+/// 分支端口输出（核心 → BRU）。无请求有效信号，BRU 以 `op != 0` 判断。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BrOut {
+    /// 控制流 op：0000 无 / 0110 BRA / 0111 BRAF / 1000 BRAP·REA / 1001 CALL·RET
+    pub op: u8,
+    /// 跳转目标地址（16bit，来自指令 `bits[27:12]`）
+    pub jump_addr: u16,
+    /// 条件编码 0..15
+    pub cond: u8,
+    /// BRA 的收敛属性位（0 普通 / 1 收敛）
+    pub uncond_attr: bool,
+    /// 子类型：CALL/RET(0/1)、BRAP/REA(0/1)
+    pub func: bool,
+}
+
+/// 访存接口请求（P0 原子 / P1 普通写 / P2 普通读）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MemReq {
     /// 是否有访存请求。
     pub valid: bool,
-    /// 命令类型：取 op=1010 的 func 字段（0000 STR … 0110 ATCAS），具体语义待协议展开。
+    /// 命令类型：取 op=1010 的 func（0000 STR … 0110 ATCAS）。
     pub kind: u8,
-    /// 访存地址（协议展开前为占位）。
-    pub addr: u16,
-    /// 写数据（协议展开前为占位）。
+    /// 访存地址（17bit，低 17bit 有效）。
+    pub addr: u32,
+    /// 写数据（STR/PUSH/原子 value 或 ATCAS 的 cmp）。
     pub wdata: u16,
+    /// ATCAS 的 new 值（其余为 0）。
+    pub wdata2: u16,
+    /// 读/原子操作的目的寄存器。
+    pub dst: u8,
+    /// 普通写（P1）。
+    pub is_write: bool,
+    /// 普通读（P2）。
+    pub is_read: bool,
+    /// 原子操作（P0）。
+    pub is_atomic: bool,
 }
 
 /// 一个指令周期的对外输出。
@@ -82,15 +107,17 @@ pub struct CycleOut {
     pub flags: u16,
     /// 本周期是否发生了比较（标志是否有效）。
     pub flags_valid: bool,
-    /// 访存接口请求（骨架）。
+    /// 访存接口请求。
     pub mem: MemReq,
+    /// 分支端口输出（给 BRU）。
+    pub branch: BrOut,
     /// 是否已停机。
     pub halted: bool,
     /// 是否已完成（DONE/DONEF）。
     pub done: bool,
 }
 
-/// 线程核心：内部含寄存器组、线程上下文、整数/浮点标志与译码控制逻辑。
+/// 线程核心：内部含寄存器组、线程上下文、整数/浮点标志、掩码寄存器与译码控制逻辑。
 #[derive(Debug, Clone, Default)]
 pub struct ThreadCore {
     pub rf: RegFile,
@@ -98,6 +125,8 @@ pub struct ThreadCore {
     pub int_flags: IntFlags,
     pub float_flags: FloatFlags,
     pub flags_valid: bool,
+    /// 1bit 掩码寄存器（MOV type=0111 写入，输出给 BRU）。
+    pub mask: bool,
     pub halted: bool,
     pub done: bool,
 }
@@ -106,6 +135,12 @@ pub struct ThreadCore {
 #[inline]
 fn fld(instr: u32, n: u32) -> u8 {
     ((instr >> (28 - 4 * n)) & 0xF) as u8
+}
+
+/// 分支跳转地址：指令 `bits[27:12]`（16bit，即 field1..field4）。
+#[inline]
+fn branch_addr(instr: u32) -> u16 {
+    ((instr >> 12) & 0xFFFF) as u16
 }
 
 /// 打包计算标志端口：低 10bit 整数 + 高 6bit 浮点。
@@ -137,6 +172,7 @@ impl ThreadCore {
         self.int_flags = IntFlags::default();
         self.float_flags = FloatFlags::default();
         self.flags_valid = false;
+        self.mask = false;
         self.halted = false;
         self.done = false;
     }
@@ -156,6 +192,17 @@ impl ThreadCore {
         pack_flags(&self.int_flags, &self.float_flags)
     }
 
+    /// 掩码标志端口值（1bit 掩码寄存器）。
+    pub fn mask_port(&self) -> bool {
+        self.mask
+    }
+
+    /// 完成一次「读内存」回写：把读到的数据写入目的寄存器并提交（模拟同拍上升沿）。
+    pub fn apply_load(&mut self, dst: u8, data: u16) {
+        self.rf.write(true, dst, data);
+        self.rf.tick();
+    }
+
     /// 执行一个指令周期。
     ///
     /// - `en=false`：使能端口为 0，本周期按 NOP 处理（不写回、不改标志）。
@@ -169,6 +216,7 @@ impl ThreadCore {
         let opc = ((instr >> 28) & 0xF) as u8;
         let mut write: Option<(u8, u16)> = None; // (dst, data)
         let mut mem = MemReq::default();
+        let mut branch = BrOut::default();
         let mut new_int = false;
         let mut new_float = false;
 
@@ -179,12 +227,14 @@ impl ThreadCore {
                 let dst = fld(instr, 1);
                 let src_reg = fld(instr, 2);
                 let ty = fld(instr, 5);
-                let v = if ty == 0 {
-                    self.rf.read(src_reg) // reg <=> reg
+                if ty == 0 {
+                    write = Some((dst, self.rf.read(src_reg))); // reg <=> reg
+                } else if ty == 7 {
+                    // type=0111: mask <- reg[0]（仅取源寄存器第 0 位）
+                    self.mask = (self.rf.read(src_reg) & 1) != 0;
                 } else {
-                    self.ctx.by_mov_type(ty) // reg <= 线程上下文
-                };
-                write = Some((dst, v));
+                    write = Some((dst, self.ctx.by_mov_type(ty))); // reg <= 线程上下文
+                }
             }
 
             op::LDI => {
@@ -238,13 +288,106 @@ impl ThreadCore {
             }
 
             op::MEM => {
-                // 访存协议后续展开：本轮仅产生接口请求骨架，暂不写回。
-                mem = MemReq {
-                    valid: true,
-                    kind: fld(instr, 5),
-                    addr: 0,
-                    wdata: 0,
+                // 访存协议中部分细节（响应时序/原子/栈）仍待展开，这里按当前已确认的
+                // 字段布局发出请求；地址 = base + offset（低 17bit），无 offset 时 base 直接作地址。
+                let f = fld(instr, 5);
+                let base = self.rf.read(fld(instr, 3));
+                let off = self.rf.read(fld(instr, 4));
+                let base_addr = (base as u32) & 0x1FFFF;
+                let mut a = (base as u32).wrapping_add(off as u32) & 0x1FFFF;
+                mem.valid = true;
+                mem.kind = f;
+                match f {
+                    0b0000 => {
+                        // STR：field1 未用，field2=源数据，field3=base，field4=offset
+                        mem.is_write = true;
+                        mem.wdata = self.rf.read(fld(instr, 2));
+                    }
+                    0b0001 => {
+                        // LDR：field1=dst，field3=base，field4=offset
+                        mem.is_read = true;
+                        mem.dst = fld(instr, 1);
+                    }
+                    0b0010 => {
+                        // PUSH：field2=入栈数据；地址暂取 r15（栈基址），栈语义待展开
+                        mem.is_write = true;
+                        mem.wdata = self.rf.read(fld(instr, 2));
+                        a = base_addr;
+                    }
+                    0b0011 => {
+                        // POP：field1=dst；地址暂取 r15
+                        mem.is_read = true;
+                        mem.dst = fld(instr, 1);
+                        a = base_addr;
+                    }
+                    0b0100 => {
+                        // ATADD：field1=dst，field2=value，field3=base，field4=offset
+                        mem.is_atomic = true;
+                        mem.dst = fld(instr, 1);
+                        mem.wdata = self.rf.read(fld(instr, 2));
+                    }
+                    0b0101 => {
+                        // ATSWAP：field1=dst，field2=value，field3=base
+                        mem.is_atomic = true;
+                        mem.dst = fld(instr, 1);
+                        mem.wdata = self.rf.read(fld(instr, 2));
+                        a = base_addr;
+                    }
+                    0b0110 => {
+                        // ATCAS：field1=dst，field2=cmp，field3=base，field4=new
+                        mem.is_atomic = true;
+                        mem.dst = fld(instr, 1);
+                        mem.wdata = self.rf.read(fld(instr, 2));
+                        mem.wdata2 = self.rf.read(fld(instr, 4));
+                        a = base_addr;
+                    }
+                    _ => mem.valid = false,
+                }
+                mem.addr = a;
+            }
+
+            // 执行流控制：仅产生分支端口输出，是否跳转由外部 BRU 决定。
+            op::BRA => {
+                branch = BrOut {
+                    op: opc,
+                    jump_addr: branch_addr(instr),
+                    cond: 0,
+                    uncond_attr: fld(instr, 5) & 1 != 0,
+                    func: false,
                 };
+            }
+            op::BRAF => {
+                branch = BrOut {
+                    op: opc,
+                    jump_addr: branch_addr(instr),
+                    cond: fld(instr, 5),
+                    uncond_attr: false,
+                    func: false,
+                };
+            }
+            op::BRAP_REA => {
+                // field5：BRAP=0000，REA=0001
+                branch = BrOut {
+                    op: opc,
+                    jump_addr: branch_addr(instr),
+                    cond: 0,
+                    uncond_attr: false,
+                    func: fld(instr, 5) & 1 != 0,
+                };
+            }
+            op::RET => {
+                // op=1001：field5 0=CALL、1=RET（CALL/RET）
+                branch = BrOut {
+                    op: opc,
+                    jump_addr: branch_addr(instr),
+                    cond: 0,
+                    uncond_attr: false,
+                    func: fld(instr, 5) & 1 != 0,
+                };
+            }
+            op::SYNC => {
+                // 全局栅栏：指令集备注“不允许在分支路径内加入全局栅栏”。
+                // 本轮仅透传为待实现标记（不阻塞）。
             }
 
             op::HLT => {
@@ -281,6 +424,7 @@ impl ThreadCore {
             flags: self.flags_port(),
             flags_valid: self.flags_valid,
             mem,
+            branch,
             halted: self.halted,
             done: self.done,
         }
@@ -396,6 +540,51 @@ mod tests {
         let mut c = ThreadCore::new();
         let out = c.cycle(true, enc(op::MEM, 0, 0, 0, 0, 0));
         assert!(out.mem.valid);
+    }
+
+    #[test]
+    fn mov_writes_mask() {
+        let mut c = ThreadCore::new();
+        preset(&mut c, 1, 0x0003);
+        // MOV type=0111：field1 目的忽略，field2=源；mask <- reg[0]
+        c.cycle(true, enc(op::MOV, 0, 1, 0, 0, 0x7));
+        assert!(c.mask);
+        preset(&mut c, 2, 0x0002);
+        c.cycle(true, enc(op::MOV, 0, 2, 0, 0, 0x7));
+        assert!(!c.mask);
+    }
+
+    #[test]
+    fn bra_decodes_target_addr_and_attr() {
+        let mut c = ThreadCore::new();
+        let instr = (0x6u32 << 28) | (0x1234u32 << 12) | ((1u32) << 8); // attr=1
+        let out = c.cycle(true, instr);
+        assert_eq!(out.branch.op, op::BRA);
+        assert_eq!(out.branch.jump_addr, 0x1234);
+        assert!(out.branch.uncond_attr);
+        assert!(!out.branch.func);
+    }
+
+    #[test]
+    fn brap_rea_func_bit() {
+        let mut c = ThreadCore::new();
+        // BRAP: field5=0000
+        let out = c.cycle(true, (0x8u32 << 28) | ((0x10u32) << 12));
+        assert_eq!(out.branch.op, op::BRAP_REA);
+        assert!(!out.branch.func);
+        // REA: field5=0001
+        let out = c.cycle(true, (0x8u32 << 28) | ((1u32) << 8));
+        assert!(out.branch.func);
+    }
+
+    #[test]
+    fn call_ret_func_bit() {
+        let mut c = ThreadCore::new();
+        let out = c.cycle(true, enc(op::RET, 0, 0, 0, 0, 0)); // CALL
+        assert_eq!(out.branch.op, op::RET);
+        assert!(!out.branch.func);
+        let out = c.cycle(true, enc(op::RET, 0, 0, 0, 0, 1)); // RET
+        assert!(out.branch.func);
     }
 
     #[test]

@@ -1,11 +1,11 @@
-# 分支端口（Branch Interface）规格书 —— GPU 模拟器
+﻿# 分支端口（Branch Interface）规格书 —— GPU 模拟器
 
 - 项目：GPU 模拟器
 - 模块：线程核心 → 外部 **BRU（分支单元）**
 - 状态：**端口结构与编码已确认；未写实现代码**
 - 更新日期：2026-11-23
 - 依据：用户 m00281 规定 + 指令集流控段（**BRA/BRAF/BRAP/REA/CALL/RET**，2026-11-23 更新版）
-- 关联：`docs/thread_core_spec.md`、`docs/mem_interface_spec.md`、`docs/bru_interface_spec.md`
+- 关联：`docs/core/thread_core_spec.md`、`docs/memory/mem_interface_spec.md`、`docs/warp/bru_interface_spec.md`
 
 ---
 

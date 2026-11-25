@@ -14,3 +14,6 @@ Thumbs.db
 
 # 本地临时/沙箱产物
 *.log
+
+# dump_xlsx.py 生成的转储输出（脚本本身保留）
+dump_xlsx.txt

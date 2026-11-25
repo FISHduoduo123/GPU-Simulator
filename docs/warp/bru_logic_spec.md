@@ -1,11 +1,11 @@
-# BRU 内部逻辑设计 —— GPU 模拟器
+﻿# BRU 内部逻辑设计 —— GPU 模拟器
 
 - 项目：GPU 模拟器
 - 模块：外部 **BRU（Branch Unit）内部判定/输出逻辑**
 - 状态：**BRA 普通属性、BRAF 三状态收敛逻辑已确认；弹栈/收敛点等细节待用户继续完善；未写实现代码**
 - 更新日期：2026-11-24
 - 依据：用户规定（4 核共享 PC；BRA func 双属性；PC 顺延 +2；BRAF 三状态收敛栈）
-- 关联：`docs/bru_interface_spec.md`（端口）、`docs/branch_interface_spec.md`（分支端口）
+- 关联：`docs/warp/bru_interface_spec.md`（端口）、`docs/warp/branch_interface_spec.md`（分支端口）
 
 ---
 

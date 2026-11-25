@@ -1,11 +1,11 @@
-# BRU（分支单元）接口规格书 —— GPU 模拟器
+﻿# BRU（分支单元）接口规格书 —— GPU 模拟器
 
 - 项目：GPU 模拟器
 - 模块：外部 **BRU（Branch Unit）**
 - 状态：**接口结构已确认；未写实现代码**
 - 更新日期：2026-11-23
 - 依据：用户规定（4 组核心输入接口 + 16bit 地址输出 + 1bit 跳转请求输出 + 4 个使能输出）
-- 关联：`docs/branch_interface_spec.md`（核心→BRU 分支端口）、`docs/thread_core_spec.md`
+- 关联：`docs/warp/branch_interface_spec.md`（核心→BRU 分支端口）、`docs/core/thread_core_spec.md`
 
 ---
 
