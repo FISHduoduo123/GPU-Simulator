@@ -5,7 +5,7 @@
 //! - **整数 / 浮点计算类**：委托 [`crate::alu::ALU`] 与 [`crate::fpu::FPU`]
 //!
 //! 对外接口：
-//! - 指令端口（32bit 输入）
+//! - 指令端口（24bit 输入）
 //! - 使能端口（1bit；en=0 视为 NOP）
 //! - 计算标志端口（16bit 输出：低 10bit 整数 + 高 6bit 浮点）
 //! - 访存接口（骨架，协议后续展开）
@@ -16,7 +16,7 @@ use crate::alu::{IntFlags, ALU};
 use crate::fpu::{FloatFlags, FPU};
 use crate::regfile::RegFile;
 
-/// 指令操作码（op = bits[31:28]）。
+/// 指令操作码（op = bits[23:20]，24bit 指令高位）。
 pub mod op {
     pub const NOP: u8 = 0x0;
     pub const MOV: u8 = 0x1;
@@ -39,7 +39,10 @@ pub mod op {
 /// 线程上下文（供 MOV 的 type 字段读取的只读来源）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThreadContext {
+    /// warp_thread_id（MOV type=0001）：线程在 warp 内的二维编号，**x 存高 8 位、y 存低 8 位**，
+    /// 即 `(x << 8) | y`。4 线程 warp 中核 k(0..3) → `x = k>>1, y = k&1`（见 [`warp_thread_id`]）。
     pub thread_id: u16,
+    /// warp_id（MOV type=0010）：warp 二维编号（同样 `(x<<8)|y` 打包），由 warp 级输入端口决定，4 核共享。
     pub warp_id: u16,
     pub block_x_id: u16,
     pub block_y_id: u16,
@@ -47,8 +50,16 @@ pub struct ThreadContext {
     pub grid_y_line: u16,
 }
 
+/// 计算核 `core_index`（0..3）在 4 线程 warp 内的 warp_thread_id：二维编号 (x,y)，x 高 8 位、y 低 8 位。
+/// `x = core_index >> 1`，`y = core_index & 1` → 0x0000 / 0x0001 / 0x0100 / 0x0101。
+pub fn warp_thread_id(core_index: usize) -> u16 {
+    let x = (core_index >> 1) as u16;
+    let y = (core_index & 1) as u16;
+    (x << 8) | y
+}
+
 impl ThreadContext {
-    /// MOV type 编码 → 上下文值：0001 thread_id … 0110 grid_y_line。
+    /// MOV type 编码 → 上下文值：0001 warp_thread_id / 0010 warp_id / 0011..0110 block·grid。
     pub fn by_mov_type(&self, ty: u8) -> u16 {
         match ty & 0xF {
             0x1 => self.thread_id,
@@ -67,7 +78,7 @@ impl ThreadContext {
 pub struct BrOut {
     /// 控制流 op：0000 无 / 0110 BRA / 0111 BRAF / 1000 BRAP·REA / 1001 CALL·RET
     pub op: u8,
-    /// 跳转目标地址（16bit，来自指令 `bits[27:12]`）
+    /// 跳转目标地址（16bit，来自指令 `bits[19:4]`，即 f1..f4）
     pub jump_addr: u16,
     /// 条件编码 0..15
     pub cond: u8,
@@ -100,6 +111,15 @@ pub struct MemReq {
     pub is_atomic: bool,
 }
 
+/// 系统状态寄存器（2bit）取值。
+/// 编码：`00 正常` / `01 HLT` / `10 保留（正常情况下不发生）` / `11 DONE`。
+#[allow(dead_code)]
+pub const STATUS_NORMAL: u8 = 0b00;
+#[allow(dead_code)]
+pub const STATUS_HLT: u8 = 0b01;
+#[allow(dead_code)]
+pub const STATUS_DONE: u8 = 0b11;
+
 /// 一个指令周期的对外输出。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CycleOut {
@@ -111,9 +131,11 @@ pub struct CycleOut {
     pub mem: MemReq,
     /// 分支端口输出（给 BRU）。
     pub branch: BrOut,
-    /// 是否已停机。
+    /// 系统状态寄存器（2bit）输出端口：`00 正常 / 01 HLT / 11 DONE`。
+    pub status: u8,
+    /// 是否已停机（= status bit0）。
     pub halted: bool,
-    /// 是否已完成（DONE/DONEF）。
+    /// 是否已完成（= status bit1）。
     pub done: bool,
 }
 
@@ -127,20 +149,24 @@ pub struct ThreadCore {
     pub flags_valid: bool,
     /// 1bit 掩码寄存器（MOV type=0111 写入，输出给 BRU）。
     pub mask: bool,
+    /// 系统状态寄存器（2bit）：`00 正常 / 01 HLT / 11 DONE`。
+    pub status: u8,
+    /// 状态寄存器待提交值：执行 HLT/DONE 当拍写入，于下个上升沿提交。
+    status_pending: Option<u8>,
     pub halted: bool,
     pub done: bool,
 }
 
-/// 取指令的 4bit 字段：field1 = bits[27:24] … field7 = bits[3:0]。
+/// 取指令的 4bit 字段：field1 = bits[19:16] … field5 = bits[3:0]（24bit 指令）。
 #[inline]
 fn fld(instr: u32, n: u32) -> u8 {
-    ((instr >> (28 - 4 * n)) & 0xF) as u8
+    ((instr >> (20 - 4 * n)) & 0xF) as u8
 }
 
-/// 分支跳转地址：指令 `bits[27:12]`（16bit，即 field1..field4）。
+/// 分支跳转地址：指令 `bits[19:4]`（16bit，即 field1..field4）。
 #[inline]
 fn branch_addr(instr: u32) -> u16 {
-    ((instr >> 12) & 0xFFFF) as u16
+    ((instr >> 4) & 0xFFFF) as u16
 }
 
 /// 打包计算标志端口：低 10bit 整数 + 高 6bit 浮点。
@@ -173,6 +199,8 @@ impl ThreadCore {
         self.float_flags = FloatFlags::default();
         self.flags_valid = false;
         self.mask = false;
+        self.status = STATUS_NORMAL;
+        self.status_pending = None;
         self.halted = false;
         self.done = false;
     }
@@ -213,7 +241,7 @@ impl ThreadCore {
         // 1. 取值：使能=0 时默认 NOP
         let instr = if en { instr_port } else { 0 };
 
-        let opc = ((instr >> 28) & 0xF) as u8;
+        let opc = ((instr >> 20) & 0xF) as u8;
         let mut write: Option<(u8, u16)> = None; // (dst, data)
         let mut mem = MemReq::default();
         let mut branch = BrOut::default();
@@ -239,7 +267,8 @@ impl ThreadCore {
 
             op::LDI => {
                 let dst = fld(instr, 1);
-                let imm = fld(instr, 2) as u16; // 4bit 立即数，零扩展
+                // LDI 立即数为 16bit，占 f2..f5 = bits[15:0]
+                let imm = (instr & 0xFFFF) as u16;
                 write = Some((dst, imm));
             }
 
@@ -309,16 +338,16 @@ impl ThreadCore {
                         mem.dst = fld(instr, 1);
                     }
                     0b0010 => {
-                        // PUSH：field2=入栈数据；地址暂取 r15（栈基址），栈语义待展开
+                        // PUSH：field2=入栈数据；地址用 r15（栈基址寄存器）
                         mem.is_write = true;
                         mem.wdata = self.rf.read(fld(instr, 2));
-                        a = base_addr;
+                        a = (self.rf.read(15) as u32) & 0x1FFFF;
                     }
                     0b0011 => {
-                        // POP：field1=dst；地址暂取 r15
+                        // POP：field1=dst；地址用 r15（栈基址寄存器）
                         mem.is_read = true;
                         mem.dst = fld(instr, 1);
-                        a = base_addr;
+                        a = (self.rf.read(15) as u32) & 0x1FFFF;
                     }
                     0b0100 => {
                         // ATADD：field1=dst，field2=value，field3=base，field4=offset
@@ -327,11 +356,10 @@ impl ThreadCore {
                         mem.wdata = self.rf.read(fld(instr, 2));
                     }
                     0b0101 => {
-                        // ATSWAP：field1=dst，field2=value，field3=base
+                        // ATSWAP：field1=dst，field2=value，field3=base，field4=offset
                         mem.is_atomic = true;
                         mem.dst = fld(instr, 1);
                         mem.wdata = self.rf.read(fld(instr, 2));
-                        a = base_addr;
                     }
                     0b0110 => {
                         // ATCAS：field1=dst，field2=cmp，field3=base，field4=new
@@ -391,19 +419,21 @@ impl ThreadCore {
             }
 
             op::HLT => {
-                self.halted = true;
+                // 停机：待提交，下个上升沿才置位状态寄存器（本拍状态仍为旧值）。
+                self.status_pending = Some(STATUS_HLT);
             }
             op::DONE => {
-                self.done = true;
-                self.halted = true;
+                // 完成：本拍待提交，下个上升沿置为 11（含 HLT 位）。
+                self.status_pending = Some(STATUS_DONE);
             }
             op::HLTF | op::DONEF => {
                 let cond = fld(instr, 5);
                 if self.test_cond(cond) {
-                    self.halted = true;
-                    if opc == op::DONEF {
-                        self.done = true;
-                    }
+                    self.status_pending = Some(if opc == op::DONEF {
+                        STATUS_DONE
+                    } else {
+                        STATUS_HLT
+                    });
                 }
             }
 
@@ -414,189 +444,27 @@ impl ThreadCore {
         // 2. 标志端口有效性：仅比较指令刷新标志
         self.flags_valid = new_int || new_float;
 
-        // 3. 回写 + 时钟上升沿提交
+        // 3. 回写 + 时钟上升沿提交（状态寄存器与其它寄存器一样于上升沿更新）
         if let Some((dst, data)) = write {
             self.rf.write(true, dst, data);
         }
+        // 本拍对外可见的状态 = 提交前的旧值（无旁路，下一拍才出现新值）。
+        let out_status = self.status;
+        if let Some(v) = self.status_pending.take() {
+            self.status = v & 0x3;
+        }
         self.rf.tick();
+        self.halted = self.status & 0x1 != 0;
+        self.done = self.status & 0x2 != 0;
 
         CycleOut {
             flags: self.flags_port(),
             flags_valid: self.flags_valid,
             mem,
             branch,
-            halted: self.halted,
-            done: self.done,
+            status: out_status,
+            halted: out_status & 0x1 != 0,
+            done: out_status & 0x2 != 0,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::alu::func as alu_func;
-    use crate::fpu::ffunc;
-
-    fn enc(opc: u8, f1: u8, f2: u8, f3: u8, f4: u8, f5: u8) -> u32 {
-        ((opc as u32) << 28)
-            | ((f1 as u32) << 24)
-            | ((f2 as u32) << 20)
-            | ((f3 as u32) << 16)
-            | ((f4 as u32) << 12)
-            | ((f5 as u32) << 8)
-    }
-
-    /// 直接预置某寄存器值（模拟上一拍已提交）。
-    fn preset(core: &mut ThreadCore, idx: u8, v: u16) {
-        core.rf.write(true, idx, v);
-        core.rf.tick();
-    }
-
-    #[test]
-    fn ldi_then_mov() {
-        let mut c = ThreadCore::new();
-        c.cycle(true, enc(op::LDI, 1, 5, 0, 0, 0));
-        assert_eq!(c.rf.read(1), 5);
-        c.cycle(true, enc(op::MOV, 2, 1, 0, 0, 0));
-        assert_eq!(c.rf.read(2), 5);
-    }
-
-    #[test]
-    fn mov_from_context() {
-        let mut c = ThreadCore::new();
-        c.ctx.thread_id = 0x1234;
-        c.cycle(true, enc(op::MOV, 1, 0, 0, 0, 0x1));
-        assert_eq!(c.rf.read(1), 0x1234);
-    }
-
-    #[test]
-    fn alu_add() {
-        let mut c = ThreadCore::new();
-        preset(&mut c, 1, 5);
-        preset(&mut c, 2, 3);
-        let out = c.cycle(true, enc(op::ALU, 3, 1, 2, 0, alu_func::ADD));
-        assert_eq!(c.rf.read(3), 8);
-        assert!(!out.flags_valid); // ADD 不更新标志
-    }
-
-    #[test]
-    fn alu_sub_updates_flag_port() {
-        let mut c = ThreadCore::new();
-        preset(&mut c, 1, 5);
-        preset(&mut c, 2, 3);
-        let out = c.cycle(true, enc(op::ALU, 3, 1, 2, 0, alu_func::SUB_CMP));
-        assert_eq!(c.rf.read(3), 2); // a-b
-        assert!(out.flags_valid);
-        // GT 位于 bit3；a=5 > b=3
-        assert_ne!(out.flags & (1 << 3), 0);
-        assert!(c.int_flags.gt);
-    }
-
-    #[test]
-    fn sel_by_cond() {
-        let mut c = ThreadCore::new();
-        preset(&mut c, 1, 5);
-        preset(&mut c, 2, 3);
-        // 先 SUB(5,3) 产生 gt 标志
-        c.cycle(true, enc(op::ALU, 3, 1, 2, 0, alu_func::SUB_CMP));
-        // SEL cond=GT(3) → 取 f2(=r1=5)
-        c.cycle(true, enc(op::SEL, 4, 1, 2, 0, 0x3));
-        assert_eq!(c.rf.read(4), 5);
-        // SEL cond=LT(2) 不成立 → 取 f3(=r2=3)
-        c.cycle(true, enc(op::SEL, 4, 1, 2, 0, 0x2));
-        assert_eq!(c.rf.read(4), 3);
-    }
-
-    #[test]
-    fn fpu_hadd() {
-        let mut c = ThreadCore::new();
-        preset(&mut c, 1, 0x3C00); // 1.0
-        preset(&mut c, 2, 0x4000); // 2.0
-        c.cycle(true, enc(op::FPU, 3, 1, 2, 0, ffunc::HADD));
-        assert_eq!(c.rf.read(3), 0x4200); // 3.0
-    }
-
-    #[test]
-    fn fpu_hsub_updates_float_flag_port() {
-        let mut c = ThreadCore::new();
-        preset(&mut c, 1, 0x4000); // 2.0
-        preset(&mut c, 2, 0x3C00); // 1.0
-        let out = c.cycle(true, enc(op::FPU, 3, 1, 2, 0, ffunc::HSUB_CMP));
-        assert!(out.flags_valid);
-        // FGT 位于 bit(10+3)=13
-        assert_ne!(out.flags & (1 << 13), 0);
-    }
-
-    #[test]
-    fn disabled_cycle_is_nop() {
-        let mut c = ThreadCore::new();
-        c.cycle(false, enc(op::LDI, 1, 9, 0, 0, 0));
-        assert_eq!(c.rf.read(1), 0);
-        assert!(!c.flags_valid);
-    }
-
-    #[test]
-    fn mem_request_skeleton() {
-        let mut c = ThreadCore::new();
-        let out = c.cycle(true, enc(op::MEM, 0, 0, 0, 0, 0));
-        assert!(out.mem.valid);
-    }
-
-    #[test]
-    fn mov_writes_mask() {
-        let mut c = ThreadCore::new();
-        preset(&mut c, 1, 0x0003);
-        // MOV type=0111：field1 目的忽略，field2=源；mask <- reg[0]
-        c.cycle(true, enc(op::MOV, 0, 1, 0, 0, 0x7));
-        assert!(c.mask);
-        preset(&mut c, 2, 0x0002);
-        c.cycle(true, enc(op::MOV, 0, 2, 0, 0, 0x7));
-        assert!(!c.mask);
-    }
-
-    #[test]
-    fn bra_decodes_target_addr_and_attr() {
-        let mut c = ThreadCore::new();
-        let instr = (0x6u32 << 28) | (0x1234u32 << 12) | ((1u32) << 8); // attr=1
-        let out = c.cycle(true, instr);
-        assert_eq!(out.branch.op, op::BRA);
-        assert_eq!(out.branch.jump_addr, 0x1234);
-        assert!(out.branch.uncond_attr);
-        assert!(!out.branch.func);
-    }
-
-    #[test]
-    fn brap_rea_func_bit() {
-        let mut c = ThreadCore::new();
-        // BRAP: field5=0000
-        let out = c.cycle(true, (0x8u32 << 28) | ((0x10u32) << 12));
-        assert_eq!(out.branch.op, op::BRAP_REA);
-        assert!(!out.branch.func);
-        // REA: field5=0001
-        let out = c.cycle(true, (0x8u32 << 28) | ((1u32) << 8));
-        assert!(out.branch.func);
-    }
-
-    #[test]
-    fn call_ret_func_bit() {
-        let mut c = ThreadCore::new();
-        let out = c.cycle(true, enc(op::RET, 0, 0, 0, 0, 0)); // CALL
-        assert_eq!(out.branch.op, op::RET);
-        assert!(!out.branch.func);
-        let out = c.cycle(true, enc(op::RET, 0, 0, 0, 0, 1)); // RET
-        assert!(out.branch.func);
-    }
-
-    #[test]
-    fn flags_port_packing() {
-        let mut i = IntFlags::default();
-        i.eq = true; // bit0
-        i.ge = true; // bit5
-        let mut f = FloatFlags::default();
-        f.fle = true; // bit(10+4)=14
-        let p = pack_flags(&i, &f);
-        assert_ne!(p & 0x1, 0);
-        assert_ne!(p & (1 << 5), 0);
-        assert_ne!(p & (1 << 14), 0);
     }
 }

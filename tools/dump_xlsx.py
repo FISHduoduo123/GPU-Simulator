@@ -12,6 +12,6 @@ for ws in wb.worksheets:
                 vals.append(f"{c.coordinate}={c.value}")
         if vals:
             out.write(" | ".join(vals) + "\n")
-with open(r"D:\Codes\GPU\dump_xlsx.txt", "w", encoding="utf-8") as f:
+with open(r"D:\Codes\GPU\tools\dump_xlsx.txt", "w", encoding="utf-8") as f:
     f.write(out.getvalue())
 print("written")

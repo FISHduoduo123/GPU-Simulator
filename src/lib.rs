@@ -28,8 +28,8 @@ pub use bru::{BruCoreIn, BruOut, BRU};
 pub use fpu::{f32_to_half, ffunc, half_to_f32, FloatFlags, FpuResult, FPU};
 pub use memory::Memory;
 pub use regfile::RegFile;
-pub use system::{enc, GpuSystem, StepOut};
-pub use thread_core::{op, BrOut, CycleOut, MemReq, ThreadContext, ThreadCore};
+pub use system::{enc, enc_ldi, GpuSystem, StepOut};
+pub use thread_core::{op, warp_thread_id, BrOut, CycleOut, MemReq, ThreadContext, ThreadCore};
 
 /// 一个把寄存器组、ALU、FPU 按规格连接的最小示意图（仅供说明，非流水线实现）。
 ///

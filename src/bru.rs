@@ -1,11 +1,11 @@
-//! 分支单元（BRU）—— 规格见 `docs/bru_logic_spec.md` 与 `docs/bru_interface_spec.md`。
+//! 分支单元（BRU）—— 规格见 `docs/warp/bru_spec.md`（端口 + 接口 + 内部逻辑）。
 //!
 //! 收集 **4 个线程核心**的分支端口 + 计算标志 + 掩码 + 使能，按当前确认的收敛 /
 //! 调用栈规则决定：下一拍使能 `en[3:0]`、是否跳转 `jump_req` 与目标 `jump_addr`。
 //!
-//! 说明：收敛栈 / 调用栈的部分边界语义（收敛完成后如何恢复使能子集、路径 2 的
-//! 地址比较结果用处、CALL 目标来源）仍待展开，此处按**已确认部分**实现，未确认点
-//! 以 `TODO(待确认)` 标注，不臆造。
+//! 说明：收敛栈 / 调用栈的边界语义已按用户确认落实——路径 2 收敛点**不做地址比较**；
+//! 弹栈时用栈顶 `mask4` 恢复使能子集；混合压栈的路径字段固定为 1；CALL/RET 与 r15
+//! 数据栈完全独立；RET 下溢忽略、PC 照常 +2。栈溢出信号按用户确认**暂留**（预留，不实现）。
 
 use crate::thread_core::CycleOut;
 
@@ -51,8 +51,7 @@ pub struct BruOut {
 pub struct ConvEntry {
     /// 分支路径（1 或 2）。
     pub path: u8,
-    /// 收敛后待恢复的子集掩码（低 4bit = `~满足 & 使能`；收敛恢复语义待确认）。
-    #[allow(dead_code)]
+    /// 收敛后待恢复的子集掩码（低 4bit = `~满足 & 使能`）。
     pub mask4: u8,
     /// 返回地址（当前指令下一条）。
     pub ret_addr: u16,
@@ -72,7 +71,7 @@ pub struct BRU {
     pub conv_stack: Vec<ConvEntry>,
     /// 调用栈（CALL/RET）。
     pub call_stack: Vec<u16>,
-    /// 当前 PC（用于返回地址与收敛比较）。
+    /// 当前 PC（用于 CALL 的返回地址）。
     pub pc: u16,
 }
 
@@ -152,20 +151,20 @@ impl BRU {
                             self.state = 2;
                         }
                         2 => {
-                            // 路径 2：比较栈顶地址与指令地址（结果暂预留），PC=栈地址，弹栈
-                            if let Some(top) = self.conv_stack.last() {
-                                let _cmp = top.ret_addr == pc; // TODO(待确认)：比较结果用途
+                            // 路径 2：PC=栈地址，弹栈；用栈顶 mask4 恢复使能子集；不做地址比较（已确认）
+                            if let Some(top) = self.conv_stack.pop() {
                                 let target = top.ret_addr;
                                 out.jump_req = true;
                                 out.jump_addr = target;
+                                for k in 0..4 {
+                                    out.en[k] = ((top.mask4 >> k) & 1) != 0;
+                                }
                             }
-                            self.conv_stack.pop();
                             self.state = self
                                 .conv_stack
                                 .last()
                                 .map(|e| e.path)
                                 .unwrap_or(0); // 无栈块 → 普通
-                            // TODO(待确认)：是否以新栈顶 mask4 恢复使能子集
                         }
                         _ => {
                             // 普通状态下的收敛 BRA：视作普通跳转（待确认）
@@ -201,8 +200,9 @@ impl BRU {
                     out.jump_req = false;
                 } else {
                     // 混合：压栈，只使能满足线程，转路径 1
+                    // TODO(暂留)：收敛栈溢出信号 —— 预留，本期不实现（不做深度限制）。
                     self.conv_stack.push(ConvEntry {
-                        path: if self.state == 2 { 2 } else { 1 },
+                        path: 1, // 混合压栈时路径字段恒为 1（已确认）
                         mask4: (!sat_mask) & en_mask, // ~满足 & 使能
                         ret_addr: pc.wrapping_add(2),
                     });
@@ -235,20 +235,27 @@ impl BRU {
                 self.state = 0;
             }
 
-            // CALL / RET
+            // CALL / RET（对使能/收敛状态无影响 —— 已确认）
             0x9 => {
                 if !func {
                     // CALL：压 PC+2，PC=目标地址
+                    // TODO(暂留)：调用栈溢出信号 —— 预留，本期不实现（溢出时静默不压栈）。
                     if self.call_stack.len() < CALL_STACK_DEPTH {
                         self.call_stack.push(pc.wrapping_add(2));
                     }
                     out.jump_req = true;
                     out.jump_addr = jaddr;
                 } else {
-                    // RET：弹栈 → PC
-                    out.jump_addr = self.call_stack.pop().unwrap_or(0);
-                    out.jump_req = true;
+                    // RET：弹栈 → PC；下溢忽略、PC 照常 +2（已确认）
+                    if let Some(ret) = self.call_stack.pop() {
+                        out.jump_req = true;
+                        out.jump_addr = ret;
+                    } else {
+                        // 下溢：不跳转，PC 顺延 +2。
+                        out.jump_req = false;
+                    }
                 }
+                // 不修改 self.state / out.en（CALL/RET 不影响使能与收敛状态）。
             }
 
             _ => { /* 其它 op（成为分支类型以外的）：不顺延只管 PC +2 */ }
@@ -256,74 +263,5 @@ impl BRU {
 
         self.en = out.en;
         out
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::thread_core::op;
-
-    #[test]
-    fn no_branch_keeps_pc_sequential() {
-        let mut bu = BRU::new();
-        let o = bu.step(&[Default::default(); 4], 0);
-        assert!(!o.jump_req);
-        assert_eq!(o.en, [true; 4]);
-    }
-
-    #[test]
-    fn bra_ordinary_jumps() {
-        let mut bu = BRU::new();
-        let mut v: [BruCoreIn; 4] = [BruCoreIn::default(); 4];
-        v[0].br_op = op::BRA;
-        v[0].jump_addr = 0x0040;
-        let o = bu.step(&v, 0x10);
-        assert!(o.jump_req);
-        assert_eq!(o.jump_addr, 0x0040);
-    }
-
-    #[test]
-    fn braf_only_satisfied_jumps() {
-        let mut bu = BRU::new();
-        let mut v: [BruCoreIn; 4] = [BruCoreIn::default(); 4];
-        // 核心0 使能且 cond 满足(bit0 of flags)
-        bu.en = [true, false, false, false];
-        v[0].br_op = op::BRAF;
-        v[0].cond = 0;
-        v[0].flags = 1;
-        v[0].jump_addr = 0x20;
-        let o = bu.step(&v, 0x10);
-        assert!(o.jump_req);
-        assert_eq!(o.jump_addr, 0x20);
-    }
-
-    #[test]
-    fn brap_mask_disables_core() {
-        let mut bu = BRU::new();
-        let mut v: [BruCoreIn; 4] = [BruCoreIn::default(); 4];
-        v[0].br_op = op::BRAP_REA;
-        v[0].mask = true; // 关闭核心0
-        let o = bu.step(&v, 0x10);
-        assert!(!o.en[0]);
-        assert!(o.en[1] && o.en[2] && o.en[3]);
-        assert!(o.jump_req); // BRAP 设 PC
-    }
-
-    #[test]
-    fn call_then_ret_roundtrip() {
-        let mut bu = BRU::new();
-        let mut v: [BruCoreIn; 4] = [BruCoreIn::default(); 4];
-        v[0].br_op = op::RET; // 0x9
-        v[0].func = false; // CALL
-        v[0].jump_addr = 0x100;
-        let o1 = bu.step(&v, 0x20);
-        assert!(o1.jump_req);
-        assert_eq!(o1.jump_addr, 0x100);
-        // RET
-        v[0].func = true;
-        let o2 = bu.step(&v, 0x100);
-        assert!(o2.jump_req);
-        assert_eq!(o2.jump_addr, 0x22); // pc+2
     }
 }

@@ -1,0 +1,5 @@
+[package]
+name = "assembler"
+version = "0.1.0"
+edition = "2021"
+description = "GPU 汇编编译器：.asm → 24bit 指令流 + 整段半字内存镜像（含宏系统，单文件 src/main.rs，输出简易文本 .hex）"

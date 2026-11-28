@@ -10,3 +10,7 @@ readme = "README.md"
 # license = "MIT"
 
 [dependencies]
+
+[[bin]]
+name = "gpu"
+path = "src/main.rs"
