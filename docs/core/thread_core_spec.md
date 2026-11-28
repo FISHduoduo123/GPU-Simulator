@@ -87,8 +87,17 @@
 ### 3.4 访存接口（骨架）
 - **输出**：`mem_req_valid`（有请求）、`mem_req_cmd`（读/写/原子）、`mem_req_addr`、`mem_req_wdata`（及原子所需的第二数据）。
 - **输入**：`mem_rd_valid` / `mem_rd_data`（读返回）。
-- 覆盖 STR/LDR/PUSH/POP/ATADD/ATSWAP/ATCAS；详细端口与协议见 `docs/memory/memory_spec.md`。
-- PUSH/POP 使用栈基址 `r15`。
+- 覆盖 STR/LDR/ATADD/ATSWAP/ATCAS；详细端口与协议见 `docs/memory/memory_spec.md`。
+- **PUSH/POP 不走普通访存口**，改为专用**栈请求输出端口**（2026-11-28 已定，接内存控制器）：
+
+  | 端口 | 位宽 | 说明 |
+  |---|---|---|
+  | `stack_op` | 2bit | 00 无 / 01 PUSH / 10 POP |
+  | `stack_addr` | 17bit | = `r15`（栈基址 / 内核地址） |
+  | `stack_wdata` | 16bit | 仅 PUSH 有效（= f2 待压值） |
+
+  - PUSH：f2 为待压值；POP：f1 为目的寄存器（读返回经普通 `mem_rd_data` 写回）。
+  - 有效访存地址与计数器时序由**内存控制器**完成，见 `docs/memory/global_mem_controller_spec.md` §3.1。
 
 ### 3.5 计算标志端口（16bit）
 - `flags[9:0]` = 10bit 整数标志；`flags[15:10]` = 6bit 浮点标志。
@@ -114,5 +123,6 @@
 - 2026-11-25：指令端口 32bit → 24bit（`g_rdata[31:8]`）。
 - 2026-11-26：统一文档格式；状态更新为“主要指令已实现”；补全指令执行状态表。
 - 2026-11-26：新增 2bit 系统状态寄存器与状态输出端口（HLT=01 / DONE=11，上升沿提交），新增 §3.6。
+- 2026-11-28：PUSH/POP 改走专用栈请求输出端口（`stack_op`2/`stack_addr`17=r15/`stack_wdata`16），不再用普通访存口直发 r15 地址；有效地址与计数器由内存控制器完成（见 `docs/memory/global_mem_controller_spec.md` §3.1）。待落码。
 - 2026-11-27：MOV type 0011/0100/0101/0110 的取值来源改为 **warp 外部输入端口** `block_x/block_y/grid_x/grid_y`（16bit，4 核共享同值；原误称 32bit 已更正为 16bit），见 `docs/warp/warp_spec.md` §2；warp_id(type 0010) 暂写死待定。待落码。
 - 2026-11-28：MOV type 0001=**warp_thread_id**（2D 编号，x 高 8 位、y 低 8 位；4 线程 warp 核 k→x=k>>1、y=k&1，值 `(x<<8)|y`）；type 0010=**warp_id**（warp 级输入端口，2D 编号同打包，4 核共享，默认 0）。均 16bit 写入 rd=f1。详见 `docs/指令集表.md` MOV type 子表。**已落码实现**（`warp_thread_id()` + `GpuSystem::set_warp_inputs`，cargo build 通过并实测）。

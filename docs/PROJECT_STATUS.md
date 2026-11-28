@@ -88,3 +88,4 @@
 - 2026-11-28：用户说「可以写代码了，把新增都实现」→ 已落码：`thread_core::warp_thread_id(k)`（2D 打包）、`GpuSystem` 新增 `warp_id/block_x/block_y/grid_x/grid_y` 字段 + `set_warp_inputs()` 写入 4 核 `ThreadContext`；MOV type 0001/0010/0011–0110 经 `ctx.by_mov_type` 生效。`cargo build` 通过；实测 core0..3 的 warp_thread_id = 0x0000/0x0001/0x0100/0x0101，warp_id/block_x 全核一致；demo 回归正常（9 周期停机）。
 - 2026-11-28：README 改为面向用户的自述——删除「项目约定」「仍悬置的项目级定义」「口令」备注与开发向文档链接，仅保留介绍/快速上手/命令行/目录/组件状态/文档（指令集表与 docs 概览）。
 - 2026-11-28：新建分支 `design/memory-decouple`——决定把**整个统一内存与 warp 的连接断开**（取指+访存），内存上移 GPU 全局级；新增 `docs/memory/global_mem_controller_spec.md`（全局内存控制器骨架：warp 级内存控制接口 ↔ 全局内存控制器，取指按原方式，调度器不管内存；端口/仲裁待细说）。未写代码。
+- 2026-11-28：PUSH/POP 栈机制已定—— 核心新增栈请求输出端口（`stack_op`2bit[00无/01PUSH/10POP] + `stack_addr`17bit=r15 + `stack_wdata`16bit），接内存控制器；控制器内 16bit 计数器（初0、回绕），有效地址=r15+计数器；PUSH 下拍上升沿 counter+1，POP 本拍组合 counter-1、下拍上升沿更新。落盘 `docs/core/thread_core_spec.md` §3.4 与 `docs/memory/global_mem_controller_spec.md` §3.1。未写代码。
