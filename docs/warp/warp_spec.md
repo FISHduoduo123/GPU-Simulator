@@ -30,7 +30,7 @@
 - BRU 汇总分支请求、判定条件、给出新 PC 与 4 核使能（详见 `docs/warp/bru_spec.md`）。
 
 ## 4. 待确认 / 悬置
-- warp 与外部（多个 warp / 调度器 / 全局内存仲裁）的接口。
+- **warp 与外部接口（2026-11-28 分支 design/memory-decouple 设计中）**：把**整个统一内存与 warp 的连接断开**（取指 + 访存），内存上移到 **GPU 全局级**（见 [`docs/memory/global_mem_controller_spec.md`](docs/memory/global_mem_controller_spec.md)）；warp 通过**warp 级内存控制接口**连接**全局内存控制器**，取指按原方式（PC 在 warp 内）。端口/仲裁待细说。
 - warp 内访存冲突仲裁（同拍同地址）。
 - 项目级：接口形态/运行方式/验收标准（`docs/open_items.md` E1–E3）。
 

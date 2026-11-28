@@ -5,7 +5,7 @@
 | 项 | 说明 |
 |---|---|
 | 交付形态 | 命令行：`assembler <输入.asm> <输出.hex>`（即 `cargo run -- <in.asm> <out.hex>`） |
-| 源码 | 单文件 `src/main.rs`（~2950 行，含内联单元测试） |
+| 源码 | 单文件 `src/main.rs`（~2980 行，含内联单元测试） |
 | 状态 | 26 个单元测试全绿，clippy / fmt 干净 |
 
 ---
@@ -19,6 +19,8 @@ cargo test
 cargo run -- examples/asm.asm target/asm.hex          # 最简示例
 cargo run -- examples/macro_test.asm target/m.hex     # 宏系统示例
 ```
+
+**快速编译（免输路径）**：`compile.bat` —— 把一个或多个 `.asm` 文件**拖到 `compile.bat` 图标上**（或 `compile.bat <a.asm> [b.asm ...]`），每个输入自动在同目录生成同名 `.hex`；优先用已编译的 `target\release\assembler.exe`，没有则自动 `cargo build --release` 一次再逐个编译。
 
 - 错误与警告走 **stderr**（带 `文件:行号` 定位）；成功退出码 0。
 - 编译**成功**时向 **stdout** 打印 `=== 内存结构 ===` / `=== 宏列表 ===` / `=== 标签列表 ===` 三张 ASCII 表格（§6）。
@@ -195,6 +197,7 @@ ASCII 表格，列宽按终端显示宽度计算（CJK 计 2 列），边框严�
 assembler/
 ├── Cargo.toml / Cargo.lock
 ├── .gitignore
+├── compile.bat        # 拖拽一个或多个 .asm 到此脚本，逐个编译出同名 .hex（见 §1）
 ├── README.md
 ├── src/main.rs        # 全部源码（单文件 + 内联测试）
 └── examples/          # asm.asm / macro_test.asm / gpu_core.inc

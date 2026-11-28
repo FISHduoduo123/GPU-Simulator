@@ -32,8 +32,8 @@ B1–B7 均已确认（2026-11-26），摘要：收敛点不比较、弹栈用 `
 
 | # | 事项 | 现状 | 归属 |
 |---|---|---|---|
-| D1 | warp 对外接口（多 warp / 调度器 / 全局内存仲裁） | 待定，与 D6 联动 | `docs/warp/warp_spec.md` §4 |
-| D2 | 共享取指通道接线 | ✅ 已实现 2026-11-26：统一内存取指 `fetch=read32be(pc,BE_FETCH)>>8`，`imem` 已移除 | `docs/memory/memory_spec.md` §3.6 |
+| D1 | warp 对外接口：内存上移 GPU 全局级（分支 design/memory-decouple） | 设计中：warp 级内存控制接口 ↔ 全局内存控制器（`docs/memory/global_mem_controller_spec.md`）；端口/仲裁待细说 | `docs/warp/warp_spec.md` §4；`docs/memory/global_mem_controller_spec.md` |
+| D2 | 共享取指通道接线 | 曾实现统一内存取指；**本分支将断开**，改经全局内存控制器（取指方式不变） | `docs/memory/memory_spec.md` §3.6；`docs/memory/global_mem_controller_spec.md` |
 | D3 | 停机（HLT/DONE）后 PC 行为 | ✅ 已定（实现）：收尾拍 PC 保持、不再取指 | `docs/warp/pc_spec.md`；`src/system.rs` flush |
 | D4 | SYNC 语义 | 当前为不阻塞桩；分支路径内栅栏可能死锁，阻塞语义待定 | `docs/core/thread_core_spec.md` §3.3 |
 | D5 | **WCU 输出端口**列表/位宽/语义 | 已确认输入（4×2bit status）与聚合（全部核心 status≠00），输出待用户细说 | `docs/warp/wcu_spec.md` §2.2/§4 |
